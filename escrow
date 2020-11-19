@@ -6,6 +6,7 @@
 
 # use passmg_escrow.cfg.template as a template, and put a password in there.
 
+# needs `yum install perl-JSON` on amazonlinux2
 
 # GLOBALS ##################################################################
 
