@@ -19,7 +19,7 @@ use MIME::Base64;
 $ENV{'PATH'} = undef;
 
 use vars qw/ $MAXDATA $MAXLABEL $DEBUG /;
-use vars qw/ $PASSWD $PASSMG $DEFGRP /;
+use vars qw/ $CFGFILE $PASSWD $PASSMG $DEFGRP /;
 
 $DEBUG = 1;
 
