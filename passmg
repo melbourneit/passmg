@@ -1494,8 +1494,8 @@ sub read_config ($) {
 		return(0);
 	}
 
-        unless ($ret = do ($cfg)) {
-                if ($@) {
+	unless ($ret = do ($cfg)) {
+		if ($@) {
 			$@ =~ s/^.*\n//s;
 			putlog('err', "Unable to read config file: $cfg: $@");
                         return(0);

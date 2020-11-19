@@ -1,0 +1,245 @@
+#!/usr/bin/perl
+
+# needs a config file (passmg_escrow.cfg in one of the following dirs:
+# - /etc
+# - /usr/local/etc
+
+# use passmg_escrow.cfg.template as a template, and put a password in there.
+
+
+# GLOBALS ##################################################################
+
+use strict;
+
+use JSON;
+use Sys::Syslog;
+use IPC::Open2;
+use MIME::Base64;
+
+$ENV{'PATH'} = undef;
+
+use vars qw/ $MAXDATA $MAXLABEL $DEBUG /;
+use vars qw/ $PASSWD $PASSMG $DEFGRP /;
+
+$DEBUG = 1;
+
+$CFGFILE = undef;
+foreach ( "/etc", "/usr/local/etc/") {
+	next unless ( -f "$_/passmg_escrow.cfg");
+	$CFGFILE = "$_/passmg_escrow.cfg";
+	last;
+}
+
+$PASSWD = "REPLACEMEWITHSOMETHING";
+$PASSMG = '/usr/local/sbin/passmg';
+$DEFGRP = '@security';
+
+$MAXDATA = 10000;
+$MAXLABEL = 64;
+
+sub main();
+sub putlog ($$);
+sub passmg ($$$);
+sub read_config ($);
+
+main();
+
+die "Unreachable code reached";
+
+# quickly ported from passmg, don't judge me - JH
+sub read_config ($) {
+	my($cfg) = $_[0];
+	my(@stat, $ret);
+	return(1) unless defined($CFGFILE);
+	unless ($ret = do ($cfg)) {
+		if ($@) {
+			$@ =~ s/^.*\n//s;
+			#putlog('err', "Unable to read config file: $cfg: $@");
+				return(0);
+			}
+			unless (defined ($ret)) {
+			#putlog('err', "Error while read config file: $cfg: $!");
+			return(0);
+			}
+			#putlog('err', "Error in config file $cfg: $ret");
+		return(0);
+        }
+
+	#putlog('debug', "Succesfully read config file $cfg: $ret");
+
+	return (1);
+}
+# MAIN BODY ################################################################
+
+sub main () {
+	my($outp, $grps, $data);
+	my($json) = new JSON;
+
+	unless (read_config($CFGFILE)) {
+		print STDERR "Fatal: unable to load the config file.\n";
+		bail(1);
+	}
+
+	# only want the base name of the script
+	$ENV{'SCRIPT_NAME'} =~ s!^.*/!!;
+
+	# we don't want the leading / on the path
+	$ENV{'PATH_INFO'} =~ s!^/!!;
+
+	# make our real uid and effective uid match
+	$< = $>; $( = $);
+
+	putlog('notice', sprintf "%d bytes received from %s for %s",
+		$ENV{'CONTENT_LENGTH'}, $ENV{'REMOTE_ADDR'}, $ENV{'PATH_INFO'});
+
+	print "Content-type: application/json\n\n";
+
+	if ($ENV{'REQUEST_METHOD'} ne 'PUT') {
+		$outp->{'state'} = "error";
+		$outp->{'text'} = "Method must be PUT";
+		putlog('err', sprintf "%s: %s", $outp->{'state'}, $outp->{'text'});
+		print $json->pretty->encode($outp) . "\n";
+		exit(1);
+	}
+
+	if ($ENV{'CONTENT_LENGTH'} >= $MAXDATA) {
+		$outp->{'state'} = "error";
+		$outp->{'text'} = "Data is too large";
+		putlog('err', sprintf "%s: %s", $outp->{'state'}, $outp->{'text'});
+		print $json->pretty->encode($outp) . "\n";
+		exit(1);
+	}
+
+	if ($ENV{'CONTENT_LENGTH'} <= 0) {
+		$outp->{'state'} = "error";
+		$outp->{'text'} = "Data is too small";
+		putlog('err', sprintf "%s: %s", $outp->{'state'}, $outp->{'text'});
+		print $json->pretty->encode($outp) . "\n";
+		exit(1);
+	}
+
+	sysread(STDIN, $data, $ENV{'CONTENT_LENGTH'});
+
+	if (length($data) != $ENV{'CONTENT_LENGTH'}) {
+		$outp->{'state'} = "error";
+		$outp->{'text'} = "Failed to read data";
+		putlog('err', sprintf "%s: %s", $outp->{'state'}, $outp->{'text'});
+		print $json->pretty->encode($outp) . "\n";
+		exit(1);
+	}
+
+	if ($ENV{'PATH_INFO'} =~ /([^\020-\176])/) {
+		$outp->{'state'} = "error";
+		$outp->{'text'} = "Invalid char in label";
+		putlog('err', sprintf "%s: %s", $outp->{'state'}, $outp->{'text'});
+		print $json->pretty->encode($outp) . "\n";
+		exit(1);
+	} else {
+		$ENV{'PATH_INFO'} =~ /^(.*)$/;
+		$ENV{'PATH_INFO'} = $1;
+	}
+
+	if ($data =~ /([^\020-\176])/) {
+		$data = encode_base64($data, "");
+		$data = "=?us-ascii?B?$data?="
+	}
+	
+	# if the first element starts with @ it's a group name	
+	if ($ENV{'PATH_INFO'} =~ s!^(\@[^/]+)/!!) {
+		$grps = $1;
+		$grps .= ",$DEFGRP";
+	} else {
+		$grps = $DEFGRP;
+	}
+
+	if (length($ENV{'PATH_INFO'}) >= $MAXLABEL) {
+		$outp->{'state'} = "error";
+		$outp->{'text'} = "Label is too large";
+		putlog('err', sprintf "%s: %s", $outp->{'state'}, $outp->{'text'});
+		print $json->pretty->encode($outp) . "\n";
+		exit(1);
+	}
+
+	if (length($ENV{'PATH_INFO'}) <= 0) {
+		$outp->{'state'} = "error";
+		$outp->{'text'} = "Label is too small";
+		putlog('err', sprintf "%s: %s", $outp->{'state'}, $outp->{'text'});
+		print $json->pretty->encode($outp) . "\n";
+		exit(1);
+	}
+
+	unless (passmg($ENV{'PATH_INFO'}, $data, $grps)) {
+		$outp->{'state'} = "error";
+		$outp->{'text'} = "Store to escrow failed";
+		putlog('err', sprintf "%s: %s", $outp->{'state'}, $outp->{'text'});
+		print $json->pretty->encode($outp) . "\n";
+		exit(1);
+	}
+
+	putlog('notice', sprintf "Key %s updated with %d bytes for %s from %s",
+		$ENV{'PATH_INFO'}, $ENV{'CONTENT_LENGTH'},
+		$grps, $ENV{'REMOTE_ADDR'});
+
+	$outp->{'state'} = "created";
+	$outp->{'text'} = "Key has been stored";
+	$outp->{'label'} = $ENV{'PATH_INFO'};
+	$outp->{'cypher'} = $data;
+	print $json->pretty->encode($outp) . "\n";
+	
+
+	exit(0)
+}
+
+sub putlog ($$) {
+	my($pri) = $_[0];
+	my($msg) = $_[1];
+
+	chomp($msg);
+
+	return() unless (($pri ne "debug") || ($DEBUG));
+
+	$msg =~ s/([^\012\040-\176])/sprintf("\\%03o", unpack("C", $1))/eg;
+
+	eval {
+		openlog($ENV{'SCRIPT_NAME'}, 'ndelay,pid', 'daemon');
+		syslog($pri, "%s", $msg);
+		closelog();
+	};
+
+	if ($@ ne "") {
+		chomp($@);
+		$@ =~ s/^.*\n//s;
+		printf STDERR "%s: syslog failed: %s\n",
+			strftime("%b %d %T", localtime), $@;
+	}
+
+	print STDERR "" . scalar localtime () . ": $msg\n" if ($DEBUG);
+}
+
+sub passmg ($$$) {
+	my($label) = $_[0];
+	my($data) = $_[1];
+	my($grps) = $_[2];
+	my($buf, $in, $out, @cmd);
+
+
+	@cmd = ($PASSMG, "--create-key", $label, $grps);
+
+	$buf = open2($out, $in, @cmd);
+	return(0) unless ($buf > 0);
+
+	return(0) unless print $in "$PASSWD\n$data\n";
+
+	$buf = 0;
+	while (<$out>) {
+		if (/^Key.*created.$/) {
+			$buf = 1;
+		} else {
+			putlog('debug', "passmg: $_");
+		}
+	}
+
+	close($out);
+
+	return($buf);
+}
